@@ -18,7 +18,7 @@ st.title("📊 SR3-SR1 Structure Analyzer")
 st.markdown("Upload historical data and analyze structure pricing with market context")
 
 # File path
-DATA_FILE_PATH = r"C:\Users\ayush.agarwal\OneDrive - hertshtengroup.com\sofrNSSPCA\SR3SR1\Historical Data Sheet.csv"
+DATA_FILE_PATH = r"Historical Data Sheet.csv"
 
 # Sidebar info
 with st.sidebar:
