@@ -1,0 +1,407 @@
+import React, { useState, useEffect } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine, ResponsiveContainer, ScatterChart, Scatter } from 'recharts';
+import { Upload, TrendingUp, Calendar, DollarSign, Activity } from 'lucide-react';
+
+const SR3SR1Analyzer = () => {
+  const [csvData, setCsvData] = useState(null);
+  const [selectedStructure, setSelectedStructure] = useState('');
+  const [analysisData, setAnalysisData] = useState(null);
+  const [sofrData, setSOFRData] = useState(null);
+  const [fedData, setFedData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const FRED_API_KEY = 'ec39710b3961ff09572460cb2548361e';
+
+  // Parse CSV
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const text = e.target.result;
+        const lines = text.split('\n');
+        const headers = lines[0].split(',').map(h => h.trim());
+        
+        const data = [];
+        for (let i = 1; i < lines.length; i++) {
+          if (lines[i].trim()) {
+            const values = lines[i].split(',');
+            const row = {};
+            headers.forEach((header, index) => {
+              row[header] = values[index]?.trim();
+            });
+            data.push(row);
+          }
+        }
+        
+        setCsvData({ headers, data });
+        setError(null);
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  // Get contract expiry and analysis period
+  const getAnalysisPeriod = (structureName) => {
+    const match = structureName.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{2})/);
+    if (!match) return null;
+
+    const monthMap = {
+      'Jan': 0, 'Feb': 1, 'Mar': 2, 'Apr': 3, 'May': 4, 'Jun': 5,
+      'Jul': 6, 'Aug': 7, 'Sep': 8, 'Oct': 9, 'Nov': 10, 'Dec': 11
+    };
+
+    const month = monthMap[match[1]];
+    const year = 2000 + parseInt(match[2]);
+    
+    const expiryDate = new Date(year, month, 1);
+    const startDate = new Date(expiryDate);
+    startDate.setMonth(startDate.getMonth() - 8);
+
+    return { startDate, expiryDate };
+  };
+
+  // Fetch SOFR data from FRED
+  const fetchSOFRData = async (startDate, endDate) => {
+    try {
+      const start = startDate.toISOString().split('T')[0];
+      const end = endDate.toISOString().split('T')[0];
+      
+      const response = await fetch(
+        `https://api.stlouisfed.org/fred/series/observations?series_id=SOFR&api_key=${FRED_API_KEY}&file_type=json&observation_start=${start}&observation_end=${end}`
+      );
+      
+      const data = await response.json();
+      return data.observations?.map(obs => ({
+        date: obs.date,
+        value: parseFloat(obs.value)
+      })) || [];
+    } catch (err) {
+      console.error('Error fetching SOFR data:', err);
+      return [];
+    }
+  };
+
+  // Fetch Fed Funds Rate (proxy for Fed decisions)
+  const fetchFedData = async (startDate, endDate) => {
+    try {
+      const start = startDate.toISOString().split('T')[0];
+      const end = endDate.toISOString().split('T')[0];
+      
+      const response = await fetch(
+        `https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=${FRED_API_KEY}&file_type=json&observation_start=${start}&observation_end=${end}`
+      );
+      
+      const data = await response.json();
+      const observations = data.observations || [];
+      
+      // Detect rate changes (Fed decisions)
+      const decisions = [];
+      for (let i = 1; i < observations.length; i++) {
+        const curr = parseFloat(observations[i].value);
+        const prev = parseFloat(observations[i - 1].value);
+        
+        if (curr !== prev && !isNaN(curr) && !isNaN(prev)) {
+          decisions.push({
+            date: observations[i].date,
+            rate: curr,
+            change: curr - prev
+          });
+        }
+      }
+      
+      return decisions;
+    } catch (err) {
+      console.error('Error fetching Fed data:', err);
+      return [];
+    }
+  };
+
+  // Analyze structure
+  const analyzeStructure = async () => {
+    if (!selectedStructure || !csvData) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const period = getAnalysisPeriod(selectedStructure);
+      if (!period) {
+        setError('Could not parse structure name');
+        setLoading(false);
+        return;
+      }
+
+      const { startDate, expiryDate } = period;
+
+      // Filter data for the period
+      const filteredData = csvData.data.filter(row => {
+        const rowDate = new Date(row.Timestamp);
+        return rowDate >= startDate && rowDate <= expiryDate;
+      });
+
+      // Calculate statistics
+      const values = filteredData.map(row => parseFloat(row[selectedStructure])).filter(v => !isNaN(v));
+      const mean = values.reduce((a, b) => a + b, 0) / values.length;
+      const sorted = [...values].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      const stdDev = Math.sqrt(values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / values.length);
+      
+      const currentValue = values[values.length - 1];
+      const zScore = (currentValue - mean) / stdDev;
+
+      // Fetch external data
+      const [sofr, fed] = await Promise.all([
+        fetchSOFRData(startDate, expiryDate),
+        fetchFedData(startDate, expiryDate)
+      ]);
+
+      setSOFRData(sofr);
+      setFedData(fed);
+
+      // Prepare chart data
+      const chartData = filteredData.map(row => {
+        const date = new Date(row.Timestamp);
+        const sofrMatch = sofr.find(s => s.date === row.Timestamp.split(' ')[0]);
+        
+        return {
+          date: row.Timestamp,
+          dateObj: date,
+          structure: parseFloat(row[selectedStructure]),
+          sofr: sofrMatch ? sofrMatch.value : null
+        };
+      });
+
+      setAnalysisData({
+        chartData,
+        statistics: {
+          mean: mean.toFixed(4),
+          median: median.toFixed(4),
+          stdDev: stdDev.toFixed(4),
+          min: Math.min(...values).toFixed(4),
+          max: Math.max(...values).toFixed(4),
+          current: currentValue.toFixed(4),
+          zScore: zScore.toFixed(2)
+        },
+        period: {
+          start: startDate.toLocaleDateString(),
+          end: expiryDate.toLocaleDateString()
+        }
+      });
+
+    } catch (err) {
+      setError('Error analyzing data: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedStructure) {
+      analyzeStructure();
+    }
+  }, [selectedStructure]);
+
+  const CustomTooltip = ({ active, payload }) => {
+    if (active && payload && payload.length) {
+      return (
+        <div className="bg-white p-3 border border-gray-300 rounded shadow-lg">
+          <p className="font-semibold">{payload[0].payload.date}</p>
+          <p className="text-blue-600">Structure: {payload[0].value?.toFixed(4)}</p>
+          {payload[0].payload.sofr && (
+            <p className="text-green-600">SOFR: {payload[0].payload.sofr?.toFixed(3)}%</p>
+          )}
+        </div>
+      );
+    }
+    return null;
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
+      <div className="max-w-7xl mx-auto">
+        <div className="bg-white rounded-lg shadow-xl p-6 mb-6">
+          <h1 className="text-3xl font-bold text-gray-800 mb-2 flex items-center gap-2">
+            <TrendingUp className="text-blue-600" />
+            SR3-SR1 Structure Analyzer
+          </h1>
+          <p className="text-gray-600">Upload historical data and analyze structure pricing with market context</p>
+        </div>
+
+        {/* Upload Section */}
+        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+          <label className="flex items-center justify-center w-full h-32 border-2 border-dashed border-gray-300 rounded-lg cursor-pointer hover:border-blue-500 transition-colors">
+            <div className="text-center">
+              <Upload className="mx-auto h-12 w-12 text-gray-400 mb-2" />
+              <span className="text-sm text-gray-600">Click to upload CSV file</span>
+            </div>
+            <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
+          </label>
+          
+          {csvData && (
+            <div className="mt-4">
+              <p className="text-green-600 font-semibold">✓ File loaded: {csvData.data.length} rows</p>
+            </div>
+          )}
+        </div>
+
+        {/* Structure Selection */}
+        {csvData && (
+          <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Select Structure to Analyze
+            </label>
+            <select
+              value={selectedStructure}
+              onChange={(e) => setSelectedStructure(e.target.value)}
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            >
+              <option value="">Choose a structure...</option>
+              {csvData.headers.filter(h => h !== 'Timestamp').map(header => (
+                <option key={header} value={header}>{header}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {/* Loading */}
+        {loading && (
+          <div className="bg-white rounded-lg shadow-lg p-12 text-center">
+            <Activity className="animate-spin h-12 w-12 text-blue-600 mx-auto mb-4" />
+            <p className="text-gray-600">Loading analysis data...</p>
+          </div>
+        )}
+
+        {/* Error */}
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+            <p className="text-red-800">{error}</p>
+          </div>
+        )}
+
+        {/* Analysis Results */}
+        {analysisData && !loading && (
+          <>
+            {/* Statistics Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+              <div className="bg-white rounded-lg shadow-lg p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-gray-500 text-sm">Current Value</p>
+                    <p className="text-2xl font-bold text-gray-800">{analysisData.statistics.current}</p>
+                  </div>
+                  <DollarSign className="text-blue-500 h-8 w-8" />
+                </div>
+              </div>
+
+              <div className="bg-white rounded-lg shadow-lg p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-gray-500 text-sm">Z-Score</p>
+                    <p className={`text-2xl font-bold ${parseFloat(analysisData.statistics.zScore) > 1 ? 'text-red-600' : parseFloat(analysisData.statistics.zScore) < -1 ? 'text-green-600' : 'text-gray-800'}`}>
+                      {analysisData.statistics.zScore}
+                    </p>
+                  </div>
+                  <TrendingUp className="text-purple-500 h-8 w-8" />
+                </div>
+              </div>
+
+              <div className="bg-white rounded-lg shadow-lg p-4">
+                <div>
+                  <p className="text-gray-500 text-sm">Mean / Std Dev</p>
+                  <p className="text-xl font-bold text-gray-800">{analysisData.statistics.mean}</p>
+                  <p className="text-sm text-gray-600">± {analysisData.statistics.stdDev}</p>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-lg shadow-lg p-4">
+                <div>
+                  <p className="text-gray-500 text-sm">Range</p>
+                  <p className="text-lg font-bold text-gray-800">{analysisData.statistics.min} → {analysisData.statistics.max}</p>
+                  <p className="text-sm text-gray-600">Median: {analysisData.statistics.median}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Period Info */}
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+              <div className="flex items-center gap-2 mb-2">
+                <Calendar className="text-blue-600 h-5 w-5" />
+                <p className="font-semibold text-blue-900">Analysis Period</p>
+              </div>
+              <p className="text-blue-800">{analysisData.period.start} to {analysisData.period.end}</p>
+            </div>
+
+            {/* Fed Decisions */}
+            {fedData && fedData.length > 0 && (
+              <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+                <h3 className="text-xl font-bold text-gray-800 mb-4">Fed Rate Decisions</h3>
+                <div className="space-y-2">
+                  {fedData.map((decision, idx) => (
+                    <div key={idx} className="flex items-center justify-between p-3 bg-gray-50 rounded border border-gray-200">
+                      <span className="text-gray-700">{new Date(decision.date).toLocaleDateString()}</span>
+                      <span className="font-semibold">{decision.rate.toFixed(2)}%</span>
+                      <span className={`px-3 py-1 rounded text-sm font-semibold ${decision.change > 0 ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'}`}>
+                        {decision.change > 0 ? '+' : ''}{decision.change.toFixed(2)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Main Chart */}
+            <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+              <h3 className="text-xl font-bold text-gray-800 mb-4">Structure Price & SOFR History</h3>
+              <ResponsiveContainer width="100%" height={400}>
+                <LineChart data={analysisData.chartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis 
+                    dataKey="date" 
+                    angle={-45}
+                    textAnchor="end"
+                    height={80}
+                    tick={{ fontSize: 10 }}
+                  />
+                  <YAxis yAxisId="left" label={{ value: 'Structure Value', angle: -90, position: 'insideLeft' }} />
+                  <YAxis yAxisId="right" orientation="right" label={{ value: 'SOFR %', angle: 90, position: 'insideRight' }} />
+                  <Tooltip content={<CustomTooltip />} />
+                  <Legend />
+                  <ReferenceLine yAxisId="left" y={parseFloat(analysisData.statistics.mean)} stroke="red" strokeDasharray="3 3" label="Mean" />
+                  <Line yAxisId="left" type="monotone" dataKey="structure" stroke="#3B82F6" strokeWidth={2} dot={false} name="Structure Price" />
+                  <Line yAxisId="right" type="monotone" dataKey="sofr" stroke="#10B981" strokeWidth={2} dot={false} name="SOFR %" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Value Assessment */}
+            <div className="bg-white rounded-lg shadow-lg p-6">
+              <h3 className="text-xl font-bold text-gray-800 mb-4">Value Assessment</h3>
+              <div className="space-y-3">
+                {parseFloat(analysisData.statistics.zScore) > 1.5 ? (
+                  <div className="p-4 bg-red-50 border border-red-200 rounded">
+                    <p className="text-red-800 font-semibold">⚠️ Rich Territory</p>
+                    <p className="text-red-700 text-sm mt-1">Structure is trading {Math.abs(parseFloat(analysisData.statistics.zScore)).toFixed(1)} standard deviations above mean</p>
+                  </div>
+                ) : parseFloat(analysisData.statistics.zScore) < -1.5 ? (
+                  <div className="p-4 bg-green-50 border border-green-200 rounded">
+                    <p className="text-green-800 font-semibold">✓ Cheap Territory</p>
+                    <p className="text-green-700 text-sm mt-1">Structure is trading {Math.abs(parseFloat(analysisData.statistics.zScore)).toFixed(1)} standard deviations below mean</p>
+                  </div>
+                ) : (
+                  <div className="p-4 bg-blue-50 border border-blue-200 rounded">
+                    <p className="text-blue-800 font-semibold">◈ Fair Value Range</p>
+                    <p className="text-blue-700 text-sm mt-1">Structure is trading within 1.5 standard deviations of mean</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default SR3SR1Analyzer;
