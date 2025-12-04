@@ -341,4 +341,4 @@ try:
         
 except Exception as e:
     st.error(f"An error occurred: {e}")
-    st.info("Please check that the data file exists at the specified path.")
+    st.info("Please check that the data file exists at the specified path")
